@@ -94,8 +94,7 @@ app.get("/api/goszakup/margin", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   try {
     const q = encodeURIComponent(req.query.q || "");
-    const lots = await gzFetch("/lots?nameRu=" + q + "&limit=15");
-    // Реальный формат API госзакупок: { items: [ { name_ru, amount, count, customer_name_ru, dumping } ] }
+    const lots = await gzFetch("/lots?nameRu=" + q + "&limit=30");
     const arr = lots.items || (Array.isArray(lots) ? lots : []);
     const items = arr.map(function (l) {
       return {
@@ -105,8 +104,22 @@ app.get("/api/goszakup/margin", async (req, res) => {
         customer: l.customer_name_ru || l.customerNameRu || "",
         dumping: l.dumping || 0
       };
-    });
-    res.json({ query: req.query.q, total: lots.total || items.length, found: items.length, lots: items });
+    }).filter(function (x) { return x.amount > 0; });
+
+    // Статистика по суммам похожих тендеров (для расчёта реальной цены)
+    let stats = null;
+    if (items.length) {
+      const amounts = items.map(function (i) { return i.amount; }).sort(function (a, b) { return a - b; });
+      const sum = amounts.reduce(function (a, b) { return a + b; }, 0);
+      stats = {
+        count: amounts.length,
+        avg: Math.round(sum / amounts.length),
+        min: amounts[0],
+        max: amounts[amounts.length - 1],
+        median: amounts[Math.floor(amounts.length / 2)]
+      };
+    }
+    res.json({ query: req.query.q, total: lots.total || items.length, found: items.length, stats: stats, lots: items.slice(0, 15) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

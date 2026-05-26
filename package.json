@@ -1,0 +1,14 @@
+{
+  "name": "umma-backend",
+  "version": "1.0.0",
+  "description": "UMMA AI backend - прокси для Claude API и госзакупок",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "cors": "^2.8.5"
+  }
+}

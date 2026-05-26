@@ -95,16 +95,18 @@ app.get("/api/goszakup/margin", async (req, res) => {
   try {
     const q = encodeURIComponent(req.query.q || "");
     const lots = await gzFetch("/lots?nameRu=" + q + "&limit=15");
-    // вытаскиваем суммы похожих лотов — основа для оценки реальной цены
-    const items = (lots.items || lots || []).map(function (l) {
+    // Реальный формат API госзакупок: { items: [ { name_ru, amount, count, customer_name_ru, dumping } ] }
+    const arr = lots.items || (Array.isArray(lots) ? lots : []);
+    const items = arr.map(function (l) {
       return {
-        name: l.nameRu || l.name_ru || "",
+        name: l.name_ru || l.nameRu || "",
         amount: l.amount || l.sum || 0,
         count: l.count || l.quantity || 0,
-        customer: l.customerNameRu || l.customer_name_ru || ""
+        customer: l.customer_name_ru || l.customerNameRu || "",
+        dumping: l.dumping || 0
       };
     });
-    res.json({ query: req.query.q, found: items.length, lots: items });
+    res.json({ query: req.query.q, total: lots.total || items.length, found: items.length, lots: items });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

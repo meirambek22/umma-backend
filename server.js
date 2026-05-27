@@ -79,10 +79,10 @@ app.get("/api/goszakup/search", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const word = (req.query.q || "").trim();
   try {
-    // GraphQL: тянем лоты, фильтруем по статусу завершённости.
-    // Поиск по названию делаем на нашей стороне (фильтр содержит слово), т.к. в схеме нет name-фильтра.
-    const query = `query($limit: Int, $after: Int, $status: [Int]) {
-      Lots(filter: { ref_lot_status_id: $status }, limit: $limit, after: $after) {
+    // GraphQL: тянем лоты. Сначала без фильтра по статусу (подбираем правильное имя поля).
+    // Поиск по названию делаем на нашей стороне.
+    const query = `query($limit: Int, $after: Int) {
+      Lots(limit: $limit, after: $after) {
         id
         lotNumber
         nameRu
@@ -93,11 +93,10 @@ app.get("/api/goszakup/search", async (req, res) => {
         trdBuyNumberAnno
         trdBuyId
         dumping
-        RefLotsStatus { nameRu }
+        refLotStatusId
       }
     }`;
-    // статусы: 330 (опубликован), 350/360 (итоги/завершён) — пробуем набор
-    const data = await gzGraphQL(query, { limit: 200, after: 0, status: [330, 350, 360, 240, 220] });
+    const data = await gzGraphQL(query, { limit: 200, after: 0 });
     let lots = (data && data.Lots) ? data.Lots : [];
     // Фильтр по слову в названии (на нашей стороне) — точный поиск
     if (word) {
@@ -117,7 +116,7 @@ app.get("/api/goszakup/search", async (req, res) => {
         customer: l.customerNameRu || "",
         annoNumber: l.trdBuyNumberAnno || "",
         dumping: l.dumping || 0,
-        status: (l.RefLotsStatus && l.RefLotsStatus.nameRu) || ""
+        status: l.refLotStatusId || ""
       };
     }).filter(function (x) { return x.amount > 0; });
 

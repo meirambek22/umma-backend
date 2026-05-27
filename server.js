@@ -142,6 +142,35 @@ app.get("/api/goszakup/search", async (req, res) => {
   }
 });
 
+// РАЗВЕДКА: пробуем фильтр лотов с начала года. Имена полей подбираем по подсказкам GraphQL.
+// Открой /api/goszakup/wins?try=1 (или try=2, try=3) — каждая попытка пробует своё имя фильтра.
+app.get("/api/goszakup/wins", async (req, res) => {
+  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
+  const t = req.query.try || "1";
+  // Разные варианты имени фильтра по дате (пробуем по очереди)
+  const filters = {
+    "1": '{ last_update_date: ">=2026-01-01" }',
+    "2": '{ lastUpdateDate: ">=2026-01-01" }',
+    "3": '{ start_date: ">=2026-01-01" }',
+    "4": '{ publish_date: ">=2026-01-01" }'
+  };
+  const flt = filters[t] || filters["1"];
+  const query = `query($limit: Int) {
+    Lots(filter: ${flt}, limit: $limit) {
+      id
+      nameRu
+      amount
+      lastUpdateDate
+    }
+  }`;
+  try {
+    const data = await gzGraphQL(query, { limit: 5 });
+    res.json({ ok: true, triedFilter: flt, sample: data });
+  } catch (e) {
+    res.status(500).json({ triedFilter: flt, error: e.message });
+  }
+});
+
 // Поиск лотов по названию (что закупали раньше)
 // Пример: /api/goszakup/lots?q=светодиодный маяк
 app.get("/api/goszakup/lots", async (req, res) => {

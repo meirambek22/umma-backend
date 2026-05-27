@@ -78,9 +78,11 @@ async function gzGraphQL(query, variables) {
 app.get("/api/goszakup/search", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const word = (req.query.q || "").trim();
+  // дата начала периода поиска (по умолчанию начало текущего года)
+  const fromDate = (req.query.from || "2026-01-01").trim();
   try {
-    const query = `query($limit: Int, $after: Int) {
-      Lots(limit: $limit, after: $after) {
+    const query = `query($limit: Int, $after: Int, $from: String) {
+      Lots(filter: { lastUpdateDate: $from }, limit: $limit, after: $after) {
         id
         lotNumber
         nameRu
@@ -92,6 +94,7 @@ app.get("/api/goszakup/search", async (req, res) => {
         trdBuyId
         dumping
         refLotStatusId
+        lastUpdateDate
       }
     }`;
 
@@ -99,22 +102,19 @@ app.get("/api/goszakup/search", async (req, res) => {
     const words = w.split(/\s+/).filter(function (x) { return x.length > 2; });
     let matched = [];
     let after = 0;
-    const PAGES = 15;       // сколько страниц листаем
+    const PAGES = 25;       // листаем больше страниц (фильтр по дате сужает выборку)
     const PER = 200;        // лотов на странице
-    // Листаем страницы лотов и ищем слово в названии (точный поиск на нашей стороне)
     for (let p = 0; p < PAGES; p++) {
-      const data = await gzGraphQL(query, { limit: PER, after: after });
+      const data = await gzGraphQL(query, { limit: PER, after: after, from: fromDate });
       const lots = (data && data.Lots) ? data.Lots : [];
       if (!lots.length) break;
-      // фильтр по слову
       const found = words.length ? lots.filter(function (l) {
         const n = (l.nameRu || "").toLowerCase();
         return words.some(function (ww) { return n.indexOf(ww) >= 0; });
       }) : lots;
       matched = matched.concat(found);
-      // следующий after = id последнего лота
       after = lots[lots.length - 1].id;
-      if (matched.length >= 30) break;  // хватит совпадений
+      if (matched.length >= 40) break;
     }
 
     const items = matched.map(function (l) {

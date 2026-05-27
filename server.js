@@ -150,35 +150,27 @@ app.get("/api/goszakup/search", async (req, res) => {
   }
 });
 
-// РАЗВЕДКА через ИНТРОСПЕКЦИЮ: GraphQL сам рассказывает все поля типа.
-// /api/goszakup/wins?type=Contract  или  ?type=Lots  и т.д.
+// РЕАЛЬНЫЕ ЦЕНЫ ПОБЕД через Contract (точные поля из интроспекции).
+// /api/goszakup/wins?q=бритва
 app.get("/api/goszakup/wins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  const typeName = (req.query.type || "Contract").trim();
-  // Интроспекция: спрашиваем у GraphQL список полей указанного типа
-  const query = `query($t: String!) {
-    __type(name: $t) {
-      name
-      fields {
-        name
-        type { name kind ofType { name kind } }
-      }
-    }
-  }`;
+  const word = (req.query.q || "бритва").trim();
+  // Способ проверки: можно ли фильтровать Contract по названию (descriptionRu) и какие поля цены
+  const t = req.query.try || "1";
+  const queries = {
+    // 1) Договоры по слову в описании + реальная сумма contractSum/faktSum
+    "1": `{ Contract(filter:{descriptionRu:"${word}"}, limit:10){ id descriptionRu contractSum faktSum supplierBiin supplierFio trdBuyNumberAnno } }`,
+    // 2) Позиции договора (ContractUnits) — цена за единицу
+    "2": `{ __type(name:"ContractUnits"){ name fields{ name type{ name kind } } } }`,
+    // 3) Договоры без фильтра — просто посмотреть данные
+    "3": `{ Contract(limit:5){ id descriptionRu contractSum faktSum supplierFio } }`
+  };
+  const query = queries[t] || queries["1"];
   try {
-    const data = await gzGraphQL(query, { t: typeName });
-    // Упрощаем: оставляем только имена полей и их типы
-    let fields = [];
-    if (data && data.__type && data.__type.fields) {
-      fields = data.__type.fields.map(function (f) {
-        const tp = f.type || {};
-        const inner = tp.ofType || {};
-        return { field: f.name, type: tp.name || inner.name || tp.kind, kind: tp.kind };
-      });
-    }
-    res.json({ ok: true, type: typeName, fieldsCount: fields.length, fields: fields });
+    const data = await gzGraphQL(query, {});
+    res.json({ ok: true, tried: t, sample: data });
   } catch (e) {
-    res.status(500).json({ type: typeName, error: e.message });
+    res.status(500).json({ tried: t, error: e.message });
   }
 });
 

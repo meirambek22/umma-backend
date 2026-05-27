@@ -79,8 +79,6 @@ app.get("/api/goszakup/search", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const word = (req.query.q || "").trim();
   try {
-    // GraphQL: тянем лоты. Сначала без фильтра по статусу (подбираем правильное имя поля).
-    // Поиск по названию делаем на нашей стороне.
     const query = `query($limit: Int, $after: Int) {
       Lots(limit: $limit, after: $after) {
         id
@@ -96,18 +94,30 @@ app.get("/api/goszakup/search", async (req, res) => {
         refLotStatusId
       }
     }`;
-    const data = await gzGraphQL(query, { limit: 200, after: 0 });
-    let lots = (data && data.Lots) ? data.Lots : [];
-    // Фильтр по слову в названии (на нашей стороне) — точный поиск
-    if (word) {
-      const w = word.toLowerCase();
-      const words = w.split(/\s+/).filter(function (x) { return x.length > 2; });
-      lots = lots.filter(function (l) {
+
+    const w = word.toLowerCase();
+    const words = w.split(/\s+/).filter(function (x) { return x.length > 2; });
+    let matched = [];
+    let after = 0;
+    const PAGES = 15;       // сколько страниц листаем
+    const PER = 200;        // лотов на странице
+    // Листаем страницы лотов и ищем слово в названии (точный поиск на нашей стороне)
+    for (let p = 0; p < PAGES; p++) {
+      const data = await gzGraphQL(query, { limit: PER, after: after });
+      const lots = (data && data.Lots) ? data.Lots : [];
+      if (!lots.length) break;
+      // фильтр по слову
+      const found = words.length ? lots.filter(function (l) {
         const n = (l.nameRu || "").toLowerCase();
         return words.some(function (ww) { return n.indexOf(ww) >= 0; });
-      });
+      }) : lots;
+      matched = matched.concat(found);
+      // следующий after = id последнего лота
+      after = lots[lots.length - 1].id;
+      if (matched.length >= 30) break;  // хватит совпадений
     }
-    const items = lots.map(function (l) {
+
+    const items = matched.map(function (l) {
       return {
         lotNumber: l.lotNumber,
         name: l.nameRu || "",
@@ -120,7 +130,6 @@ app.get("/api/goszakup/search", async (req, res) => {
       };
     }).filter(function (x) { return x.amount > 0; });
 
-    // статистика
     let stats = null;
     if (items.length) {
       const amounts = items.map(function (i) { return i.amount; }).sort(function (a, b) { return a - b; });

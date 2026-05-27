@@ -78,11 +78,10 @@ async function gzGraphQL(query, variables) {
 app.get("/api/goszakup/search", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const word = (req.query.q || "").trim();
-  // дата начала периода поиска (по умолчанию начало текущего года)
-  const fromDate = (req.query.from || "2026-01-01").trim();
   try {
-    const query = `query($limit: Int, $after: Int, $from: [String]) {
-      Lots(filter: { lastUpdateDate: $from }, limit: $limit, after: $after) {
+    // GraphQL сам ищет по названию/описанию (nameDescriptionRu). Без листания тысяч страниц!
+    const query = `query($limit: Int, $after: Int, $q: [String]) {
+      Lots(filter: { nameDescriptionRu: $q }, limit: $limit, after: $after) {
         id
         lotNumber
         nameRu
@@ -98,31 +97,29 @@ app.get("/api/goszakup/search", async (req, res) => {
       }
     }`;
 
-    const w = word.toLowerCase();
-    const words = w.split(/\s+/).filter(function (x) { return x.length > 2; });
     let matched = [];
     let after = 0;
-    const PAGES = 25;       // листаем больше страниц (фильтр по дате сужает выборку)
-    const PER = 200;        // лотов на странице
+    const PAGES = 10;       // на случай если совпадений много — листаем страницы результатов
+    const PER = 200;
     for (let p = 0; p < PAGES; p++) {
-      const data = await gzGraphQL(query, { limit: PER, after: after, from: [fromDate] });
+      const data = await gzGraphQL(query, { limit: PER, after: after, q: [word] });
       const lots = (data && data.Lots) ? data.Lots : [];
       if (!lots.length) break;
-      const found = words.length ? lots.filter(function (l) {
-        const n = (l.nameRu || "").toLowerCase();
-        return words.some(function (ww) { return n.indexOf(ww) >= 0; });
-      }) : lots;
-      matched = matched.concat(found);
+      matched = matched.concat(lots);
       after = lots[lots.length - 1].id;
-      if (matched.length >= 40) break;
+      if (lots.length < PER) break;       // последняя страница
+      if (matched.length >= 200) break;   // достаточно
     }
 
     const items = matched.map(function (l) {
+      const cnt = l.count || 0;
+      const amt = l.amount || 0;
       return {
         lotNumber: l.lotNumber,
         name: l.nameRu || "",
-        amount: l.amount || 0,
-        count: l.count || 0,
+        amount: amt,
+        count: cnt,
+        unitPrice: cnt > 0 ? Math.round(amt / cnt) : 0,   // цена за штуку
         customer: l.customerNameRu || "",
         annoNumber: l.trdBuyNumberAnno || "",
         dumping: l.dumping || 0,
@@ -134,9 +131,20 @@ app.get("/api/goszakup/search", async (req, res) => {
     if (items.length) {
       const amounts = items.map(function (i) { return i.amount; }).sort(function (a, b) { return a - b; });
       const sum = amounts.reduce(function (a, b) { return a + b; }, 0);
-      stats = { count: amounts.length, avg: Math.round(sum / amounts.length), min: amounts[0], max: amounts[amounts.length - 1], median: amounts[Math.floor(amounts.length / 2)] };
+      // цены за штуку (только где есть количество)
+      const units = items.map(function (i) { return i.unitPrice; }).filter(function (x) { return x > 0; }).sort(function (a, b) { return a - b; });
+      let unitStats = null;
+      if (units.length) {
+        const usum = units.reduce(function (a, b) { return a + b; }, 0);
+        unitStats = { avg: Math.round(usum / units.length), min: units[0], max: units[units.length - 1], median: units[Math.floor(units.length / 2)] };
+      }
+      stats = {
+        count: amounts.length,
+        avg: Math.round(sum / amounts.length), min: amounts[0], max: amounts[amounts.length - 1], median: amounts[Math.floor(amounts.length / 2)],
+        unit: unitStats   // статистика цены за штуку
+      };
     }
-    res.json({ query: word, found: items.length, stats: stats, lots: items.slice(0, 15) });
+    res.json({ query: word, found: items.length, stats: stats, lots: items.slice(0, 13) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

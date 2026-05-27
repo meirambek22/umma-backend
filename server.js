@@ -150,29 +150,35 @@ app.get("/api/goszakup/search", async (req, res) => {
   }
 });
 
-// РАЗВЕДКА: ищем поля с ЦЕНОЙ ПОБЕДЫ (сколько реально заплатили).
+// РАЗВЕДКА через ИНТРОСПЕКЦИЮ: GraphQL сам рассказывает все поля типа.
+// /api/goszakup/wins?type=Contract  или  ?type=Lots  и т.д.
 app.get("/api/goszakup/wins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  const t = req.query.try || "1";
-  // Пробуем разные поля/связи лота, где может быть цена победителя
-  const queries = {
-    // связь лота с договором — поля договора (реальная цена по лоту)
-    "1": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id contractSum } } }`,
-    "2": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id faktSum } } }`,
-    "3": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id finalSum sumNoNds } } }`,
-    // поля цены прямо у лота
-    "4": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count priceMin pricePerUnit unitPrice } }`,
-    // ценовые предложения / результат торгов
-    "5": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count PriceOffer{ price } } }`,
-    // реестр договоров отдельно
-    "6": `{ Contract(limit:5){ id contractSum faktSum lotId trdBuyNumberAnno } }`
-  };
-  const query = queries[t] || queries["1"];
+  const typeName = (req.query.type || "Contract").trim();
+  // Интроспекция: спрашиваем у GraphQL список полей указанного типа
+  const query = `query($t: String!) {
+    __type(name: $t) {
+      name
+      fields {
+        name
+        type { name kind ofType { name kind } }
+      }
+    }
+  }`;
   try {
-    const data = await gzGraphQL(query, {});
-    res.json({ ok: true, tried: t, sample: data });
+    const data = await gzGraphQL(query, { t: typeName });
+    // Упрощаем: оставляем только имена полей и их типы
+    let fields = [];
+    if (data && data.__type && data.__type.fields) {
+      fields = data.__type.fields.map(function (f) {
+        const tp = f.type || {};
+        const inner = tp.ofType || {};
+        return { field: f.name, type: tp.name || inner.name || tp.kind, kind: tp.kind };
+      });
+    }
+    res.json({ ok: true, type: typeName, fieldsCount: fields.length, fields: fields });
   } catch (e) {
-    res.status(500).json({ tried: t, error: e.message });
+    res.status(500).json({ type: typeName, error: e.message });
   }
 });
 

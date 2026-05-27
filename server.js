@@ -147,14 +147,14 @@ app.get("/api/goszakup/search", async (req, res) => {
 app.get("/api/goszakup/wins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const t = req.query.try || "1";
-  // lastUpdateDate — правильное поле (подтверждено). Пробуем форматы значения даты.
+  // Ищем фильтр ПО НАЗВАНИЮ лота. Пробуем разные имена поля.
   const filters = {
-    "1": '{ lastUpdateDate: "2026-01-01" }',
-    "2": '{ lastUpdateDate: "2026-01-01 00:00:00" }',
-    "3": '{ lastUpdateDate: "2026-01-01T00:00:00" }',
-    "4": '{ lastUpdateDate_gte: "2026-01-01" }',
-    "5": '{ lastUpdateDateFrom: "2026-01-01" }',
-    "6": '{ last_update_date_from: "2026-01-01" }'
+    "1": '{ nameRu: "бритва" }',
+    "2": '{ name_ru: "бритва" }',
+    "3": '{ nameDescriptionRu: "бритва" }',
+    "4": '{ descriptionRu: "бритва" }',
+    "5": '{ search: "бритва" }',
+    "6": '{ nameRu: ["бритва"] }'
   };
   const flt = filters[t] || filters["1"];
   const query = `query($limit: Int) {
@@ -162,12 +162,13 @@ app.get("/api/goszakup/wins", async (req, res) => {
       id
       nameRu
       amount
-      lastUpdateDate
+      count
+      lotNumber
     }
   }`;
   try {
-    const data = await gzGraphQL(query, { limit: 5 });
-    res.json({ ok: true, triedFilter: flt, sample: data });
+    const data = await gzGraphQL(query, { limit: 10 });
+    res.json({ ok: true, triedFilter: flt, count: (data && data.Lots) ? data.Lots.length : 0, sample: data });
   } catch (e) {
     res.status(500).json({ triedFilter: flt, error: e.message });
   }

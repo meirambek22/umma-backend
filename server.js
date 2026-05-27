@@ -147,12 +147,14 @@ app.get("/api/goszakup/search", async (req, res) => {
 app.get("/api/goszakup/wins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const t = req.query.try || "1";
-  // Разные варианты имени фильтра по дате (пробуем по очереди)
+  // lastUpdateDate — правильное поле (подтверждено). Пробуем форматы значения даты.
   const filters = {
-    "1": '{ last_update_date: ">=2026-01-01" }',
-    "2": '{ lastUpdateDate: ">=2026-01-01" }',
-    "3": '{ start_date: ">=2026-01-01" }',
-    "4": '{ publish_date: ">=2026-01-01" }'
+    "1": '{ lastUpdateDate: "2026-01-01" }',
+    "2": '{ lastUpdateDate: "2026-01-01 00:00:00" }',
+    "3": '{ lastUpdateDate: "2026-01-01T00:00:00" }',
+    "4": '{ lastUpdateDate_gte: "2026-01-01" }',
+    "5": '{ lastUpdateDateFrom: "2026-01-01" }',
+    "6": '{ last_update_date_from: "2026-01-01" }'
   };
   const flt = filters[t] || filters["1"];
   const query = `query($limit: Int) {

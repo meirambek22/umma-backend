@@ -158,12 +158,14 @@ app.get("/api/goszakup/wins", async (req, res) => {
   // Способ проверки: можно ли фильтровать Contract по названию (descriptionRu) и какие поля цены
   const t = req.query.try || "1";
   const queries = {
-    // 1) Договоры по слову в описании + реальная сумма contractSum/faktSum
-    "1": `{ Contract(filter:{descriptionRu:"${word}"}, limit:10){ id descriptionRu contractSum faktSum supplierBiin supplierFio trdBuyNumberAnno } }`,
-    // 2) Позиции договора (ContractUnits) — цена за единицу
-    "2": `{ __type(name:"ContractUnits"){ name fields{ name type{ name kind } } } }`,
-    // 3) Договоры без фильтра — просто посмотреть данные
-    "3": `{ Contract(limit:5){ id descriptionRu contractSum faktSum supplierFio } }`
+    // 1) ContractUnits по lotId — реальная цена за штуку (itemPrice). Подставь реальный id лота бритвы.
+    "1": `{ ContractUnits(filter:{lotId:${(req.query.lot||"42010785")}}, limit:10){ id lotId itemPrice quantity totalSum contractSum } }`,
+    // 2) Поля фильтра ContractUnits (что можно фильтровать)
+    "2": `{ __type(name:"ContractUnitsFiltersInput"){ name inputFields{ name type{ name kind } } } }`,
+    // 3) Договоры без фильтра — примеры
+    "3": `{ Contract(limit:5){ id descriptionRu contractSum faktSum supplierFio } }`,
+    // 4) ContractUnits без фильтра — посмотреть реальные itemPrice
+    "4": `{ ContractUnits(limit:10){ id lotId itemPrice quantity totalSum } }`
   };
   const query = queries[t] || queries["1"];
   try {

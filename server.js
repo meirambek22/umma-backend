@@ -81,7 +81,7 @@ app.get("/api/goszakup/search", async (req, res) => {
   // дата начала периода поиска (по умолчанию начало текущего года)
   const fromDate = (req.query.from || "2026-01-01").trim();
   try {
-    const query = `query($limit: Int, $after: Int, $from: String) {
+    const query = `query($limit: Int, $after: Int, $from: [String]) {
       Lots(filter: { lastUpdateDate: $from }, limit: $limit, after: $after) {
         id
         lotNumber
@@ -105,7 +105,7 @@ app.get("/api/goszakup/search", async (req, res) => {
     const PAGES = 25;       // листаем больше страниц (фильтр по дате сужает выборку)
     const PER = 200;        // лотов на странице
     for (let p = 0; p < PAGES; p++) {
-      const data = await gzGraphQL(query, { limit: PER, after: after, from: fromDate });
+      const data = await gzGraphQL(query, { limit: PER, after: after, from: [fromDate] });
       const lots = (data && data.Lots) ? data.Lots : [];
       if (!lots.length) break;
       const found = words.length ? lots.filter(function (l) {

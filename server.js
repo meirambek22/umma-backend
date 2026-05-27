@@ -150,35 +150,29 @@ app.get("/api/goszakup/search", async (req, res) => {
   }
 });
 
-// РАЗВЕДКА: пробуем фильтр лотов с начала года. Имена полей подбираем по подсказкам GraphQL.
-// Открой /api/goszakup/wins?try=1 (или try=2, try=3) — каждая попытка пробует своё имя фильтра.
+// РАЗВЕДКА: ищем поля с ЦЕНОЙ ПОБЕДЫ (сколько реально заплатили).
 app.get("/api/goszakup/wins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const t = req.query.try || "1";
-  // Ищем фильтр ПО НАЗВАНИЮ лота. Пробуем разные имена поля.
-  const filters = {
-    "1": '{ nameRu: "бритва" }',
-    "2": '{ name_ru: "бритва" }',
-    "3": '{ nameDescriptionRu: "бритва" }',
-    "4": '{ descriptionRu: "бритва" }',
-    "5": '{ search: "бритва" }',
-    "6": '{ nameRu: ["бритва"] }'
+  // Пробуем разные поля/связи лота, где может быть цена победителя
+  const queries = {
+    // итоговые поля цены у самого лота
+    "1": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count lotNumber priceTotal totalSum resultSum } }`,
+    // связь с договором (Contract) — реальная сумма
+    "2": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ contractSum faktSum } } }`,
+    // связь с TrdBuy (объявление) — итоги
+    "3": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count TrdBuy{ totalSum } } }`,
+    // отдельный реестр договоров
+    "4": `{ Contract(limit:5){ id contractSum faktSum lotId } }`,
+    // цена за единицу-победителя
+    "5": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Price priceMin } }`
   };
-  const flt = filters[t] || filters["1"];
-  const query = `query($limit: Int) {
-    Lots(filter: ${flt}, limit: $limit) {
-      id
-      nameRu
-      amount
-      count
-      lotNumber
-    }
-  }`;
+  const query = queries[t] || queries["1"];
   try {
-    const data = await gzGraphQL(query, { limit: 10 });
-    res.json({ ok: true, triedFilter: flt, count: (data && data.Lots) ? data.Lots.length : 0, sample: data });
+    const data = await gzGraphQL(query, {});
+    res.json({ ok: true, tried: t, sample: data });
   } catch (e) {
-    res.status(500).json({ triedFilter: flt, error: e.message });
+    res.status(500).json({ tried: t, error: e.message });
   }
 });
 

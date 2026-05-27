@@ -1,229 +1,287 @@
 // ============================================================
 // UMMA AI — Backend (сервер-посредник)
-// Прячет ключ Claude и токен госзакупок. Браузер их не видит.
+// Безопасный backend для Claude + Госзакупок
 // ============================================================
 
 const express = require("express");
 const cors = require("cors");
 
-const app = express();
-app.use(cors());                       // разрешаем запросы с твоего сайта
-app.use(express.json({ limit: "10mb" })); // принимаем JSON (ТЗ может быть большим)
+// Node 18+ имеет fetch встроенный.
+// Для Node <18:
+// npm install node-fetch
+// const fetch = require("node-fetch");
 
-// Ключи берутся из переменных окружения Render (НЕ хранятся в коде!)
-const CLAUDE_KEY   = process.env.CLAUDE_KEY   || "";
+const app = express();
+
+// ============================================================
+// MIDDLEWARE
+// ============================================================
+
+app.use(cors());
+
+app.use(express.json({
+  limit: "10mb"
+}));
+
+// ============================================================
+// ENV
+// ============================================================
+
+const CLAUDE_KEY = process.env.CLAUDE_KEY || "";
 const GOSZAKUP_TOKEN = process.env.GOSZAKUP_TOKEN || "";
 
-// ---------- Проверка что сервер жив ----------
+if (!CLAUDE_KEY) {
+  console.warn("⚠ CLAUDE_KEY не найден");
+}
+
+if (!GOSZAKUP_TOKEN) {
+  console.warn("⚠ GOSZAKUP_TOKEN не найден");
+}
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+
+// Проверь endpoint если API изменится
+const GZ_BASE = "https://ows.goszakup.gov.kz/v3";
+
+// ============================================================
+// ROOT
+// ============================================================
+
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "UMMA backend", time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: "UMMA backend",
+    time: new Date().toISOString()
+  });
 });
 
 // ============================================================
-// 1) ПРОКСИ ДЛЯ CLAUDE — сайт шлёт сюда, мы идём в Claude с ключом
+// SAFE FETCH
 // ============================================================
-app.post("/api/claude", async (req, res) => {
-  if (!CLAUDE_KEY) return res.status(500).json({ error: "CLAUDE_KEY не настроен на сервере" });
+
+async function gzFetch(path, options = {}) {
+
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 30000);
+
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
+
+    const response = await fetch(GZ_BASE + path, {
+      ...options,
+      signal: controller.signal,
       headers: {
+        "Authorization": "Bearer " + GOSZAKUP_TOKEN,
         "Content-Type": "application/json",
-        "x-api-key": CLAUDE_KEY,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify(req.body)   // тело запроса приходит с сайта как есть
+        ...(options.headers || {})
+      }
     });
-    const data = await r.json();
-    res.status(r.status).json(data);
+
+    const text = await response.text();
+
+    let data = {};
+
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (e) {
+      throw new Error("Некорректный JSON от API госзакупок");
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        "Ошибка API госзакупок: " +
+        response.status +
+        " " +
+        JSON.stringify(data)
+      );
+    }
+
+    return data;
+
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ============================================================
+// GRAPHQL HELPER
+// ============================================================
+
+async function gzGraphQL(query, variables = {}) {
+
+  const data = await gzFetch("/graphql", {
+    method: "POST",
+    body: JSON.stringify({
+      query,
+      variables
+    })
+  });
+
+  if (data.errors) {
+    throw new Error(JSON.stringify(data.errors));
+  }
+
+  return data.data;
+}
+
+// ============================================================
+// CLAUDE PROXY
+// ============================================================
+
+app.post("/api/claude", async (req, res) => {
+
+  if (!CLAUDE_KEY) {
+    return res.status(500).json({
+      error: "CLAUDE_KEY не настроен"
+    });
+  }
+
+  try {
+
+    const response = await fetch(
+      "https://api.anthropic.com/v1/messages",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": CLAUDE_KEY,
+          "anthropic-version": "2023-06-01"
+        },
+        body: JSON.stringify(req.body)
+      }
+    );
+
+    const text = await response.text();
+
+    let data = {};
+
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {
+        raw: text
+      };
+    }
+
+    res.status(response.status).json(data);
+
   } catch (e) {
-    res.status(500).json({ error: "Ошибка обращения к Claude: " + e.message });
+
+    res.status(500).json({
+      error: "Ошибка обращения к Claude: " + e.message
+    });
+
   }
 });
 
 // ============================================================
-// 2) ГОСЗАКУПКИ — поиск похожих тендеров и цен победителей
-//    Используется для маржи и победной цены на реальных данных.
+// SEARCH SIMILAR TENDERS
 // ============================================================
 
-// Базовый адрес API госзакупок (REST v3)
-const GZ_BASE = "https://ows.goszakup.gov.kz/v3";
-
-// вспомогательная функция запроса к госзакупкам с токеном
-async function gzFetch(path) {
-  const r = await fetch(GZ_BASE + path, {
-    headers: { "Authorization": "Bearer " + GOSZAKUP_TOKEN }
-  });
-  if (!r.ok) throw new Error("Госзакупки вернули статус " + r.status);
-  return r.json();
-}
-
-// GraphQL-запрос к госзакупкам (POST на /v3/graphql)
-async function gzGraphQL(query, variables) {
-  const r = await fetch(GZ_BASE + "/graphql", {
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + GOSZAKUP_TOKEN,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ query: query, variables: variables || {} })
-  });
-  const data = await r.json();
-  if (data.errors) throw new Error(JSON.stringify(data.errors));
-  return data.data;
-}
-
-// Поиск завершённых лотов по слову в названии (GraphQL).
-// ref_lot_status_id: статусы завершённых лотов (берём несколько на пробу).
 app.get("/api/goszakup/search", async (req, res) => {
-  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  const word = (req.query.q || "").trim();
-  try {
-    const query = `query($limit: Int, $after: Int) {
-      Lots(limit: $limit, after: $after) {
-        id
-        lotNumber
-        nameRu
-        amount
-        count
-        customerBin
-        customerNameRu
-        trdBuyNumberAnno
-        trdBuyId
-        dumping
-        refLotStatusId
-      }
-    }`;
 
-    const w = word.toLowerCase();
-    const words = w.split(/\s+/).filter(function (x) { return x.length > 2; });
-    let matched = [];
-    let after = 0;
-    const PAGES = 15;       // сколько страниц листаем
-    const PER = 200;        // лотов на странице
-    // Листаем страницы лотов и ищем слово в названии (точный поиск на нашей стороне)
-    for (let p = 0; p < PAGES; p++) {
-      const data = await gzGraphQL(query, { limit: PER, after: after });
-      const lots = (data && data.Lots) ? data.Lots : [];
-      if (!lots.length) break;
-      // фильтр по слову
-      const found = words.length ? lots.filter(function (l) {
-        const n = (l.nameRu || "").toLowerCase();
-        return words.some(function (ww) { return n.indexOf(ww) >= 0; });
-      }) : lots;
-      matched = matched.concat(found);
-      // следующий after = id последнего лота
-      after = lots[lots.length - 1].id;
-      if (matched.length >= 30) break;  // хватит совпадений
+  if (!GOSZAKUP_TOKEN) {
+    return res.status(500).json({
+      error: "GOSZAKUP_TOKEN не настроен"
+    });
+  }
+
+  try {
+
+    const word = String(req.query.q || "").trim();
+
+    if (!word) {
+      return res.status(400).json({
+        error: "Укажите query параметр q"
+      });
     }
 
-    const items = matched.map(function (l) {
-      return {
+    const query = `
+      query($limit: Int, $after: Int) {
+        Lots(limit: $limit, after: $after) {
+          id
+          lotNumber
+          nameRu
+          amount
+          count
+          customerNameRu
+          trdBuyNumberAnno
+          dumping
+          refLotStatusId
+        }
+      }
+    `;
+
+    let matched = [];
+    let after = 0;
+
+    const LIMIT = 200;
+    const PAGES = 10;
+
+    const searchWords = word
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(w => w.length > 2);
+
+    for (let page = 0; page < PAGES; page++) {
+
+      const data = await gzGraphQL(query, {
+        limit: LIMIT,
+        after
+      });
+
+      const lots = data?.Lots || [];
+
+      if (!lots.length) {
+        break;
+      }
+
+      const filtered = lots.filter(lot => {
+
+        const text = String(lot.nameRu || "")
+          .toLowerCase();
+
+        return searchWords.some(sw =>
+          text.includes(sw)
+        );
+      });
+
+      matched = matched.concat(filtered);
+
+      after = lots[lots.length - 1].id;
+
+      if (matched.length >= 50) {
+        break;
+      }
+    }
+
+    const items = matched
+      .filter(l => Number(l.amount) > 0)
+      .map(l => ({
         lotNumber: l.lotNumber,
         name: l.nameRu || "",
-        amount: l.amount || 0,
-        count: l.count || 0,
+        amount: Number(l.amount || 0),
+        count: Number(l.count || 0),
         customer: l.customerNameRu || "",
         annoNumber: l.trdBuyNumberAnno || "",
         dumping: l.dumping || 0,
         status: l.refLotStatusId || ""
-      };
-    }).filter(function (x) { return x.amount > 0; });
+      }));
+
+    const amounts = items
+      .map(i => i.amount)
+      .sort((a, b) => a - b);
 
     let stats = null;
-    if (items.length) {
-      const amounts = items.map(function (i) { return i.amount; }).sort(function (a, b) { return a - b; });
-      const sum = amounts.reduce(function (a, b) { return a + b; }, 0);
-      stats = { count: amounts.length, avg: Math.round(sum / amounts.length), min: amounts[0], max: amounts[amounts.length - 1], median: amounts[Math.floor(amounts.length / 2)] };
-    }
-    res.json({ query: word, found: items.length, stats: stats, lots: items.slice(0, 15) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
-// РАЗВЕДКА: пробуем фильтр лотов с начала года. Имена полей подбираем по подсказкам GraphQL.
-// Открой /api/goszakup/wins?try=1 (или try=2, try=3) — каждая попытка пробует своё имя фильтра.
-app.get("/api/goszakup/wins", async (req, res) => {
-  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  const t = req.query.try || "1";
-  // Разные варианты имени фильтра по дате (пробуем по очереди)
-  const filters = {
-    "1": '{ last_update_date: ">=2026-01-01" }',
-    "2": '{ lastUpdateDate: ">=2026-01-01" }',
-    "3": '{ start_date: ">=2026-01-01" }',
-    "4": '{ publish_date: ">=2026-01-01" }'
-  };
-  const flt = filters[t] || filters["1"];
-  const query = `query($limit: Int) {
-    Lots(filter: ${flt}, limit: $limit) {
-      id
-      nameRu
-      amount
-      lastUpdateDate
-    }
-  }`;
-  try {
-    const data = await gzGraphQL(query, { limit: 5 });
-    res.json({ ok: true, triedFilter: flt, sample: data });
-  } catch (e) {
-    res.status(500).json({ triedFilter: flt, error: e.message });
-  }
-});
+    if (amounts.length) {
 
-// Поиск лотов по названию (что закупали раньше)
-// Пример: /api/goszakup/lots?q=светодиодный маяк
-app.get("/api/goszakup/lots", async (req, res) => {
-  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  try {
-    const q = encodeURIComponent(req.query.q || "");
-    // ищем в реестре лотов по ключевому слову (name_ru)
-    const data = await gzFetch("/lots?nameRu=" + q + "&limit=20");
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+      const sum = amounts.reduce((a, b) => a + b, 0);
 
-// Поиск договоров (реальные цены, по которым заключали) по номеру объявления
-// Пример: /api/goszakup/contracts?trdBuy=12345
-app.get("/api/goszakup/contracts", async (req, res) => {
-  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  try {
-    const id = encodeURIComponent(req.query.trdBuy || "");
-    const data = await gzFetch("/contract?trdBuyId=" + id + "&limit=20");
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ============================================================
-// 3) МАРЖА ТЕНДЕРА — связываем: ищем похожие лоты → их договоры →
-//    реальные цены побед → отдаём сайту для расчёта.
-//    (Базовая версия: вернём похожие лоты и их суммы.)
-// ============================================================
-app.get("/api/goszakup/margin", async (req, res) => {
-  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
-  try {
-    const q = encodeURIComponent(req.query.q || "");
-    const lots = await gzFetch("/lots?nameRu=" + q + "&limit=30");
-    const arr = lots.items || (Array.isArray(lots) ? lots : []);
-    const items = arr.map(function (l) {
-      return {
-        name: l.name_ru || l.nameRu || "",
-        amount: l.amount || l.sum || 0,
-        count: l.count || l.quantity || 0,
-        customer: l.customer_name_ru || l.customerNameRu || "",
-        dumping: l.dumping || 0
-      };
-    }).filter(function (x) { return x.amount > 0; });
-
-    // Статистика по суммам похожих тендеров (для расчёта реальной цены)
-    let stats = null;
-    if (items.length) {
-      const amounts = items.map(function (i) { return i.amount; }).sort(function (a, b) { return a - b; });
-      const sum = amounts.reduce(function (a, b) { return a + b; }, 0);
       stats = {
         count: amounts.length,
         avg: Math.round(sum / amounts.length),
@@ -232,14 +290,225 @@ app.get("/api/goszakup/margin", async (req, res) => {
         median: amounts[Math.floor(amounts.length / 2)]
       };
     }
-    res.json({ query: req.query.q, total: lots.total || items.length, found: items.length, stats: stats, lots: items.slice(0, 15) });
+
+    res.json({
+      query: word,
+      found: items.length,
+      stats,
+      lots: items.slice(0, 20)
+    });
+
   } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    res.status(500).json({
+      error: e.message
+    });
+
   }
 });
 
-// ---------- Запуск ----------
+// ============================================================
+// LOTS SEARCH
+// ============================================================
+
+app.get("/api/goszakup/lots", async (req, res) => {
+
+  if (!GOSZAKUP_TOKEN) {
+    return res.status(500).json({
+      error: "GOSZAKUP_TOKEN не настроен"
+    });
+  }
+
+  try {
+
+    const q = encodeURIComponent(req.query.q || "");
+
+    const data = await gzFetch(
+      "/lots?nameRu=" + q + "&limit=20"
+    );
+
+    res.json(data);
+
+  } catch (e) {
+
+    res.status(500).json({
+      error: e.message
+    });
+
+  }
+});
+
+// ============================================================
+// CONTRACTS
+// ============================================================
+
+app.get("/api/goszakup/contracts", async (req, res) => {
+
+  if (!GOSZAKUP_TOKEN) {
+    return res.status(500).json({
+      error: "GOSZAKUP_TOKEN не настроен"
+    });
+  }
+
+  try {
+
+    const trdBuyId = encodeURIComponent(
+      req.query.trdBuy || ""
+    );
+
+    if (!trdBuyId) {
+      return res.status(400).json({
+        error: "Не указан trdBuy"
+      });
+    }
+
+    const data = await gzFetch(
+      "/contracts?trdBuyId=" +
+      trdBuyId +
+      "&limit=20"
+    );
+
+    res.json(data);
+
+  } catch (e) {
+
+    res.status(500).json({
+      error: e.message
+    });
+
+  }
+});
+
+// ============================================================
+// MARGIN ANALYTICS
+// ============================================================
+
+app.get("/api/goszakup/margin", async (req, res) => {
+
+  if (!GOSZAKUP_TOKEN) {
+    return res.status(500).json({
+      error: "GOSZAKUP_TOKEN не настроен"
+    });
+  }
+
+  try {
+
+    const q = encodeURIComponent(req.query.q || "");
+
+    const lots = await gzFetch(
+      "/lots?nameRu=" + q + "&limit=30"
+    );
+
+    const arr = lots.items || (
+      Array.isArray(lots)
+        ? lots
+        : []
+    );
+
+    const items = arr
+      .map(l => ({
+        name: l.name_ru || l.nameRu || "",
+        amount: Number(l.amount || l.sum || 0),
+        count: Number(l.count || l.quantity || 0),
+        customer: l.customer_name_ru || l.customerNameRu || "",
+        dumping: l.dumping || 0
+      }))
+      .filter(x => x.amount > 0);
+
+    const amounts = items
+      .map(i => i.amount)
+      .sort((a, b) => a - b);
+
+    let stats = null;
+
+    if (amounts.length) {
+
+      const sum = amounts.reduce((a, b) => a + b, 0);
+
+      stats = {
+        count: amounts.length,
+        avg: Math.round(sum / amounts.length),
+        min: amounts[0],
+        max: amounts[amounts.length - 1],
+        median: amounts[Math.floor(amounts.length / 2)]
+      };
+    }
+
+    res.json({
+      query: req.query.q,
+      total: items.length,
+      stats,
+      lots: items.slice(0, 20)
+    });
+
+  } catch (e) {
+
+    res.status(500).json({
+      error: e.message
+    });
+
+  }
+});
+
+// ============================================================
+// WINS TEST
+// ============================================================
+
+app.get("/api/goszakup/wins", async (req, res) => {
+
+  try {
+
+    const year = new Date().getFullYear();
+
+    const startDate = `${year}-01-01`;
+
+    const query = `
+      query($limit: Int) {
+        Lots(limit: $limit) {
+          id
+          nameRu
+          amount
+        }
+      }
+    `;
+
+    const data = await gzGraphQL(query, {
+      limit: 10
+    });
+
+    res.json({
+      ok: true,
+      startDate,
+      data
+    });
+
+  } catch (e) {
+
+    res.status(500).json({
+      error: e.message
+    });
+
+  }
+});
+
+// ============================================================
+// GLOBAL ERROR HANDLERS
+// ============================================================
+
+process.on("unhandledRejection", err => {
+  console.error("UNHANDLED REJECTION:", err);
+});
+
+process.on("uncaughtException", err => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
+
+// ============================================================
+// START SERVER
+// ============================================================
+
 const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("UMMA backend запущен на порту " + PORT);
+  console.log("🚀 UMMA backend запущен на порту " + PORT);
 });

@@ -80,7 +80,7 @@ app.get("/api/goszakup/search", async (req, res) => {
   const word = (req.query.q || "").trim();
   try {
     // GraphQL сам ищет по названию/описанию (nameDescriptionRu). Без листания тысяч страниц!
-    const query = `query($limit: Int, $after: Int, $q: [String]) {
+    const query = `query($limit: Int, $after: Int, $q: String) {
       Lots(filter: { nameDescriptionRu: $q }, limit: $limit, after: $after) {
         id
         lotNumber
@@ -102,7 +102,7 @@ app.get("/api/goszakup/search", async (req, res) => {
     const PAGES = 10;       // на случай если совпадений много — листаем страницы результатов
     const PER = 200;
     for (let p = 0; p < PAGES; p++) {
-      const data = await gzGraphQL(query, { limit: PER, after: after, q: [word] });
+      const data = await gzGraphQL(query, { limit: PER, after: after, q: word });
       const lots = (data && data.Lots) ? data.Lots : [];
       if (!lots.length) break;
       matched = matched.concat(lots);

@@ -176,6 +176,77 @@ app.get("/api/goszakup/wins", async (req, res) => {
   }
 });
 
+// ФИНАЛ: реальные цены ПОБЕД за штуку по слову.
+// Цепочка: лоты по слову -> их trdBuyId -> договоры (Contract) -> ContractUnits.itemPrice
+// /api/goszakup/realwins?q=бритва
+app.get("/api/goszakup/realwins", async (req, res) => {
+  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
+  const word = (req.query.q || "").trim();
+  if (!word) return res.status(400).json({ error: "Укажите q" });
+  try {
+    // 1) Находим лоты по слову, собираем их trdBuyId
+    const lotsQuery = `query($q: String, $limit: Int){
+      Lots(filter:{ nameDescriptionRu:$q }, limit:$limit){ id nameRu trdBuyId count amount }
+    }`;
+    const lotsData = await gzGraphQL(lotsQuery, { q: word, limit: 200 });
+    const lots = (lotsData && lotsData.Lots) ? lotsData.Lots : [];
+    // уникальные trdBuyId
+    const tbIds = [];
+    lots.forEach(function (l) { if (l.trdBuyId && tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId); });
+    if (!tbIds.length) return res.json({ query: word, foundLots: lots.length, wins: [], stats: null });
+
+    // 2) По этим trdBuyId тянем договоры с позициями (реальные цены за штуку)
+    const contractQuery = `query($tb: [Int], $limit: Int){
+      Contract(filter:{ trdBuyId:$tb }, limit:$limit){
+        id descriptionRu contractSum supplierFio supplierBiin trdBuyId
+        ContractUnits{ itemPrice quantity totalSum }
+      }
+    }`;
+    // берём первые 60 trdBuyId (чтобы не перегружать)
+    const contractData = await gzGraphQL(contractQuery, { tb: tbIds.slice(0, 60), limit: 200 });
+    const contracts = (contractData && contractData.Contract) ? contractData.Contract : [];
+
+    // 3) Собираем реальные цены за штуку из позиций договоров
+    const wins = [];
+    contracts.forEach(function (c) {
+      (c.ContractUnits || []).forEach(function (u) {
+        const price = parseFloat(u.itemPrice) || 0;
+        const qty = parseFloat(u.quantity) || 0;
+        if (price > 0) {
+          wins.push({
+            description: c.descriptionRu || "",
+            supplier: c.supplierFio || "",
+            supplierBin: c.supplierBiin || "",
+            unitPrice: price,        // реальная цена ПОБЕДЫ за штуку
+            quantity: qty,
+            totalSum: parseFloat(u.totalSum) || 0,
+            contractSum: parseFloat(c.contractSum) || 0
+          });
+        }
+      });
+    });
+
+    // 4) Статистика реальных цен за штуку
+    let stats = null;
+    if (wins.length) {
+      const prices = wins.map(function (w) { return w.unitPrice; }).sort(function (a, b) { return a - b; });
+      const sum = prices.reduce(function (a, b) { return a + b; }, 0);
+      stats = {
+        count: prices.length,
+        avgUnit: Math.round(sum / prices.length),
+        minUnit: prices[0],
+        maxUnit: prices[prices.length - 1],
+        medianUnit: prices[Math.floor(prices.length / 2)]
+      };
+    }
+    // сортируем победы по цене за штуку
+    wins.sort(function (a, b) { return a.unitPrice - b.unitPrice; });
+    res.json({ query: word, foundLots: lots.length, foundContracts: contracts.length, stats: stats, wins: wins.slice(0, 15) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Поиск лотов по названию (что закупали раньше)
 // Пример: /api/goszakup/lots?q=светодиодный маяк
 app.get("/api/goszakup/lots", async (req, res) => {

@@ -156,16 +156,16 @@ app.get("/api/goszakup/wins", async (req, res) => {
   const t = req.query.try || "1";
   // Пробуем разные поля/связи лота, где может быть цена победителя
   const queries = {
-    // итоговые поля цены у самого лота
-    "1": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count lotNumber priceTotal totalSum resultSum } }`,
-    // связь с договором (Contract) — реальная сумма
-    "2": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ contractSum faktSum } } }`,
-    // связь с TrdBuy (объявление) — итоги
-    "3": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count TrdBuy{ totalSum } } }`,
-    // отдельный реестр договоров
-    "4": `{ Contract(limit:5){ id contractSum faktSum lotId } }`,
-    // цена за единицу-победителя
-    "5": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Price priceMin } }`
+    // связь лота с договором — поля договора (реальная цена по лоту)
+    "1": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id contractSum } } }`,
+    "2": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id faktSum } } }`,
+    "3": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count Contract{ id finalSum sumNoNds } } }`,
+    // поля цены прямо у лота
+    "4": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count priceMin pricePerUnit unitPrice } }`,
+    // ценовые предложения / результат торгов
+    "5": `{ Lots(filter:{nameDescriptionRu:"бритва"}, limit:5){ id nameRu amount count PriceOffer{ price } } }`,
+    // реестр договоров отдельно
+    "6": `{ Contract(limit:5){ id contractSum faktSum lotId trdBuyNumberAnno } }`
   };
   const query = queries[t] || queries["1"];
   try {

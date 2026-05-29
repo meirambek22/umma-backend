@@ -176,6 +176,24 @@ app.get("/api/goszakup/wins", async (req, res) => {
   }
 });
 
+// Проверка лота по номеру — посмотреть, есть ли он, удалён ли, статус.
+// /api/goszakup/checklot?n=84166392
+app.get("/api/goszakup/checklot", async (req, res) => {
+  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
+  const num = (req.query.n || "").trim();
+  if (!num) return res.status(400).json({ error: "Укажите n (номер лота)" });
+  try {
+    // Ищем по lotNumber несколькими формами: как ввели и с типичными суффиксами
+    const variants = [num, num+"-ЗЦП1", num+"-1", num+"-ОИ4", num+"-ОИ1"];
+    const query = `query($v: [String]){ Lots(filter:{ lotNumber:$v }, limit:20){ id lotNumber nameRu refLotStatusId isDeleted lastUpdateDate trdBuyId trdBuyNumberAnno amount count customerNameRu } }`;
+    const data = await gzGraphQL(query, { v: variants });
+    const lots = (data && data.Lots) ? data.Lots : [];
+    res.json({ query: num, variantsChecked: variants, found: lots.length, lots: lots });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ФИНАЛ: реальные цены ПОБЕД за штуку по слову.
 // Цепочка: лоты по слову -> их trdBuyId -> договоры (Contract) -> ContractUnits.itemPrice
 // /api/goszakup/realwins?q=бритва

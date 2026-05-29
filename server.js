@@ -94,6 +94,7 @@ app.get("/api/goszakup/search", async (req, res) => {
         dumping
         refLotStatusId
         lastUpdateDate
+        isDeleted
       }
     }`;
 
@@ -105,7 +106,9 @@ app.get("/api/goszakup/search", async (req, res) => {
       const data = await gzGraphQL(query, { limit: PER, after: after, q: word });
       const lots = (data && data.Lots) ? data.Lots : [];
       if (!lots.length) break;
-      matched = matched.concat(lots);
+      // ФИЛЬТР: убираем удалённые/отменённые лоты (их нет на сайте, юзеры не могут найти)
+      const active = lots.filter(function (l) { return !l.isDeleted; });
+      matched = matched.concat(active);
       after = lots[lots.length - 1].id;
       if (lots.length < PER) break;       // последняя страница
       if (matched.length >= 200) break;   // достаточно
@@ -210,10 +213,10 @@ app.get("/api/goszakup/realwins", async (req, res) => {
   try {
     // 1) Находим лоты по слову, собираем их trdBuyId
     const lotsQuery = `query($q: String, $limit: Int){
-      Lots(filter:{ nameDescriptionRu:$q }, limit:$limit){ id nameRu trdBuyId count amount }
+      Lots(filter:{ nameDescriptionRu:$q }, limit:$limit){ id nameRu trdBuyId count amount isDeleted }
     }`;
     const lotsData = await gzGraphQL(lotsQuery, { q: word, limit: 200 });
-    const lots = (lotsData && lotsData.Lots) ? lotsData.Lots : [];
+    const lots = ((lotsData && lotsData.Lots) ? lotsData.Lots : []).filter(function(l){ return !l.isDeleted; });
     // уникальные trdBuyId
     const tbIds = [];
     lots.forEach(function (l) { if (l.trdBuyId && tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId); });

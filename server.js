@@ -203,48 +203,70 @@ app.get("/api/goszakup/checklot", async (req, res) => {
   }
 });
 
-// ФИНАЛ: реальные цены ПОБЕД за штуку по слову.
-// Цепочка: лоты по слову -> их trdBuyId -> договоры (Contract) -> ContractUnits.itemPrice
+// ФИНАЛ: реальные цены ПОБЕД за штуку по слову, с описаниями для отбора похожих.
+// Цепочка: лоты по слову -> их trdBuyId+descriptionRu -> договоры (Contract) -> ContractUnits.itemPrice
 // /api/goszakup/realwins?q=бритва
 app.get("/api/goszakup/realwins", async (req, res) => {
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен на сервере" });
   const word = (req.query.q || "").trim();
   if (!word) return res.status(400).json({ error: "Укажите q" });
   try {
-    // 1) Находим лоты по слову, собираем их trdBuyId
+    // 1) Находим лоты по слову, собираем их trdBuyId, описание, имя
     const lotsQuery = `query($q: String, $limit: Int){
-      Lots(filter:{ nameDescriptionRu:$q }, limit:$limit){ id nameRu trdBuyId count amount isDeleted }
+      Lots(filter:{ nameDescriptionRu:$q }, limit:$limit){
+        id nameRu descriptionRu trdBuyId count amount isDeleted customerNameRu
+      }
     }`;
     const lotsData = await gzGraphQL(lotsQuery, { q: word, limit: 200 });
     const lots = ((lotsData && lotsData.Lots) ? lotsData.Lots : []).filter(function(l){ return !l.isDeleted; });
-    // уникальные trdBuyId
+    // map: trdBuyId -> описание лота (для связи с договорами)
+    const lotById = {};
     const tbIds = [];
-    lots.forEach(function (l) { if (l.trdBuyId && tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId); });
+    lots.forEach(function (l) {
+      if (l.trdBuyId && tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId);
+      lotById[l.id] = l;
+    });
     if (!tbIds.length) return res.json({ query: word, foundLots: lots.length, wins: [], stats: null });
 
-    // 2) По этим trdBuyId тянем договоры с позициями (реальные цены за штуку)
+    // 2) По trdBuyId тянем договоры с позициями
     const contractQuery = `query($tb: [Int], $limit: Int){
       Contract(filter:{ trdBuyId:$tb }, limit:$limit){
         id descriptionRu contractSum supplierFio supplierBiin trdBuyId
         ContractUnits{ itemPrice quantity totalSum }
       }
     }`;
-    // берём первые 60 trdBuyId (чтобы не перегружать)
     const contractData = await gzGraphQL(contractQuery, { tb: tbIds.slice(0, 60), limit: 200 });
     const contracts = (contractData && contractData.Contract) ? contractData.Contract : [];
 
-    // 3) Собираем реальные цены за штуку из позиций договоров
+    // map: trdBuyId -> массив лотов в нём (чтобы знать описание соответствующего лота)
+    const lotsByTb = {};
+    lots.forEach(function (l) {
+      if (l.trdBuyId) {
+        if (!lotsByTb[l.trdBuyId]) lotsByTb[l.trdBuyId] = [];
+        lotsByTb[l.trdBuyId].push(l);
+      }
+    });
+
+    // 3) Собираем реальные цены за штуку из позиций договоров — с описанием для отбора
     const wins = [];
     contracts.forEach(function (c) {
+      const lotsForTb = lotsByTb[c.trdBuyId] || [];
+      // Описание лота(ов) из этого объявления — это поможет фронту/Claude отобрать похожие
+      const lotName = lotsForTb.length ? lotsForTb[0].nameRu : "";
+      const lotDesc = lotsForTb.length ? (lotsForTb[0].descriptionRu || "") : "";
+      const customer = lotsForTb.length ? (lotsForTb[0].customerNameRu || "") : "";
       (c.ContractUnits || []).forEach(function (u) {
         const price = parseFloat(u.itemPrice) || 0;
         const qty = parseFloat(u.quantity) || 0;
         if (price > 0) {
           wins.push({
             description: c.descriptionRu || "",
+            lotName: lotName,                  // название лота (короткое, типа "Бритва")
+            lotDescription: lotDesc,            // подробное описание лота (характеристики)
+            customer: customer,                 // заказчик
             supplier: c.supplierFio || "",
             supplierBin: c.supplierBiin || "",
-            unitPrice: price,        // реальная цена ПОБЕДЫ за штуку
+            unitPrice: price,                   // реальная цена ПОБЕДЫ за штуку
             quantity: qty,
             totalSum: parseFloat(u.totalSum) || 0,
             contractSum: parseFloat(c.contractSum) || 0
@@ -253,7 +275,7 @@ app.get("/api/goszakup/realwins", async (req, res) => {
       });
     });
 
-    // 4) Статистика реальных цен за штуку
+    // 4) Статистика по ВСЕМ ценам
     let stats = null;
     if (wins.length) {
       const prices = wins.map(function (w) { return w.unitPrice; }).sort(function (a, b) { return a - b; });
@@ -266,9 +288,10 @@ app.get("/api/goszakup/realwins", async (req, res) => {
         medianUnit: prices[Math.floor(prices.length / 2)]
       };
     }
-    // сортируем победы по цене за штуку
+    // сортируем по цене за штуку (от меньшей к большей)
     wins.sort(function (a, b) { return a.unitPrice - b.unitPrice; });
-    res.json({ query: word, foundLots: lots.length, foundContracts: contracts.length, stats: stats, wins: wins.slice(0, 15) });
+    // Возвращаем больше побед (до 50), чтобы фронт мог отобрать похожие
+    res.json({ query: word, foundLots: lots.length, foundContracts: contracts.length, stats: stats, wins: wins.slice(0, 50) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

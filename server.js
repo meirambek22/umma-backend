@@ -183,12 +183,18 @@ app.get("/api/goszakup/checklot", async (req, res) => {
   const num = (req.query.n || "").trim();
   if (!num) return res.status(400).json({ error: "Укажите n (номер лота)" });
   try {
-    // Ищем по lotNumber несколькими формами: как ввели и с типичными суффиксами
-    const variants = [num, num+"-ЗЦП1", num+"-1", num+"-ОИ4", num+"-ОИ1"];
-    const query = `query($v: [String]){ Lots(filter:{ lotNumber:$v }, limit:20){ id lotNumber nameRu refLotStatusId isDeleted lastUpdateDate trdBuyId trdBuyNumberAnno amount count customerNameRu } }`;
-    const data = await gzGraphQL(query, { v: variants });
-    const lots = (data && data.Lots) ? data.Lots : [];
-    res.json({ query: num, variantsChecked: variants, found: lots.length, lots: lots });
+    // Перебираем формы номера (с типичными суффиксами) по одной
+    const variants = [num, num+"-ЗЦП1", num+"-1", num+"-ОИ4", num+"-ОИ1", num+"-2"];
+    const query = `query($v: String){ Lots(filter:{ lotNumber:$v }, limit:5){ id lotNumber nameRu refLotStatusId isDeleted lastUpdateDate trdBuyId trdBuyNumberAnno amount count customerNameRu } }`;
+    const allLots = [];
+    for (const v of variants) {
+      try {
+        const data = await gzGraphQL(query, { v });
+        const lots = (data && data.Lots) ? data.Lots : [];
+        lots.forEach(l => { l._matchedVariant = v; allLots.push(l); });
+      } catch (e) { /* пропускаем неудачный вариант */ }
+    }
+    res.json({ query: num, variantsChecked: variants, found: allLots.length, lots: allLots });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

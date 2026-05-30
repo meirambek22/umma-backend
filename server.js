@@ -483,131 +483,177 @@ function detectRegion(customer){
   return "Не определён";
 }
 
+// ----- Внутренняя функция заливки одного слова (используется и /seed и /seedmany)
+async function seedOneWord(word, maxPages, startAfter) {
+  let savedCount = 0;
+  let skippedCount = 0;
+  let after = startAfter || 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    const lotsQuery = `query($q:String,$limit:Int,$after:Int){
+      Lots(filter:{nameDescriptionRu:$q}, limit:$limit, after:$after){
+        id lotNumber nameRu descriptionRu trdBuyId count amount isDeleted customerNameRu lastUpdateDate
+      }
+    }`;
+    const lotsData = await gzGraphQL(lotsQuery, { q: word, limit: 200, after: after });
+    const lots = ((lotsData && lotsData.Lots) ? lotsData.Lots : []).filter(l => !l.isDeleted);
+    if (!lots.length) break;
+    after = lots[lots.length - 1].id;
+
+    const tbIds = [];
+    const lotsByTb = {};
+    lots.forEach(l => {
+      if (l.trdBuyId) {
+        if (tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId);
+        if (!lotsByTb[l.trdBuyId]) lotsByTb[l.trdBuyId] = [];
+        lotsByTb[l.trdBuyId].push(l);
+      }
+    });
+
+    const batchSize = 30;
+    for (let i = 0; i < tbIds.length; i += batchSize) {
+      const slice = tbIds.slice(i, i + batchSize);
+      const contractQuery = `query($tb:[Int],$limit:Int){
+        Contract(filter:{trdBuyId:$tb}, limit:$limit){
+          id descriptionRu contractSum supplierFio supplierBiin trdBuyId signDate
+          ContractUnits{ itemPrice quantity totalSum }
+        }
+      }`;
+      const cData = await gzGraphQL(contractQuery, { tb: slice, limit: 200 });
+      const contracts = (cData && cData.Contract) ? cData.Contract : [];
+
+      let batch = fbStore.batch();
+      let batchCount = 0;
+      for (const c of contracts) {
+        const lotsForTb = lotsByTb[c.trdBuyId] || [];
+        const lot = lotsForTb[0];
+        if (!lot) continue;
+        for (const u of (c.ContractUnits || [])) {
+          const unitPrice = parseFloat(u.itemPrice) || 0;
+          const qty = parseFloat(u.quantity) || 0;
+          if (unitPrice <= 0 || qty <= 0) { skippedCount++; continue; }
+          const budgetPerUnit = lot.count > 0 ? (parseFloat(lot.amount) || 0) / parseFloat(lot.count) : 0;
+          const dropPercent = budgetPerUnit > 0 ? Math.round(((budgetPerUnit - unitPrice) / budgetPerUnit) * 1000) / 10 : 0;
+          const category = detectCategory(lot.nameRu, lot.descriptionRu);
+          const characteristics = extractSpecsBrain(((lot.nameRu||"")+" "+(lot.descriptionRu||"")+" "+(c.descriptionRu||"")));
+
+          const docId = `${c.trdBuyId}_${lot.id}_${c.supplierBiin || "no"}_${Math.round(unitPrice)}`;
+          const docRef = fbStore.collection("tenders").doc(docId);
+          batch.set(docRef, {
+            category: category,
+            characteristics: characteristics.slice(0, 15),
+            lotId: lot.id,
+            lotNumber: lot.lotNumber || "",
+            lotName: lot.nameRu || "",
+            lotDescription: lot.descriptionRu || "",
+            contractDescription: c.descriptionRu || "",
+            budget: parseFloat(lot.amount) || 0,
+            qty: parseFloat(lot.count) || 0,
+            budgetPerUnit: Math.round(budgetPerUnit * 100) / 100,
+            winnerPrice: unitPrice,
+            winnerQty: qty,
+            winnerTotal: parseFloat(u.totalSum) || 0,
+            winnerName: c.supplierFio || "",
+            winnerBin: c.supplierBiin || "",
+            dropPercent: dropPercent,
+            customerName: lot.customerNameRu || "",
+            region: detectRegion(lot.customerNameRu),
+            signDate: c.signDate || "",
+            lotDate: lot.lastUpdateDate || "",
+            source: "goszakup",
+            seedWord: word,
+            createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+          batchCount++;
+          if (batchCount >= 450) {
+            await batch.commit();
+            savedCount += batchCount;
+            batch = fbStore.batch();
+            batchCount = 0;
+          }
+        }
+      }
+      if (batchCount > 0) {
+        await batch.commit();
+        savedCount += batchCount;
+      }
+    }
+    if (lots.length < 200) break;
+  }
+  return { word, savedTenders: savedCount, skipped: skippedCount, nextAfter: after };
+}
+
 app.get("/api/brain/seed", async (req, res) => {
   if (!fbStore) return res.status(500).json({ error: "Firebase Admin не настроен (нужна переменная FIREBASE_SA)" });
   if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен" });
   const word = (req.query.word || "").trim();
   if (!word) return res.status(400).json({ error: "Укажите параметр word" });
   const maxPages = parseInt(req.query.pages) || 1;
-
+  const startAfter = parseInt(req.query.after) || 0;
   try {
-    let savedCount = 0;
-    let skippedCount = 0;
-    let after = parseInt(req.query.after) || 0;
-
-    for (let page = 0; page < maxPages; page++) {
-      // 1) Тянем лоты по слову
-      const lotsQuery = `query($q:String,$limit:Int,$after:Int){
-        Lots(filter:{nameDescriptionRu:$q}, limit:$limit, after:$after){
-          id lotNumber nameRu descriptionRu trdBuyId count amount isDeleted customerNameRu lastUpdateDate
-        }
-      }`;
-      const lotsData = await gzGraphQL(lotsQuery, { q: word, limit: 200, after: after });
-      const lots = ((lotsData && lotsData.Lots) ? lotsData.Lots : []).filter(l => !l.isDeleted);
-      if (!lots.length) break;
-      after = lots[lots.length - 1].id;
-
-      // Карта trdBuyId → лот
-      const tbIds = [];
-      const lotsByTb = {};
-      lots.forEach(l => {
-        if (l.trdBuyId) {
-          if (tbIds.indexOf(l.trdBuyId) < 0) tbIds.push(l.trdBuyId);
-          if (!lotsByTb[l.trdBuyId]) lotsByTb[l.trdBuyId] = [];
-          lotsByTb[l.trdBuyId].push(l);
-        }
-      });
-
-      // 2) Договоры порциями
-      const batchSize = 30;
-      for (let i = 0; i < tbIds.length; i += batchSize) {
-        const slice = tbIds.slice(i, i + batchSize);
-        const contractQuery = `query($tb:[Int],$limit:Int){
-          Contract(filter:{trdBuyId:$tb}, limit:$limit){
-            id descriptionRu contractSum supplierFio supplierBiin trdBuyId signDate
-            ContractUnits{ itemPrice quantity totalSum }
-          }
-        }`;
-        const cData = await gzGraphQL(contractQuery, { tb: slice, limit: 200 });
-        const contracts = (cData && cData.Contract) ? cData.Contract : [];
-
-        // 3) Сохраняем в Firebase каждую позицию договора как отдельную запись
-        let batch = fbStore.batch();
-        let batchCount = 0;
-        for (const c of contracts) {
-          const lotsForTb = lotsByTb[c.trdBuyId] || [];
-          const lot = lotsForTb[0];
-          if (!lot) continue;
-          for (const u of (c.ContractUnits || [])) {
-            const unitPrice = parseFloat(u.itemPrice) || 0;
-            const qty = parseFloat(u.quantity) || 0;
-            if (unitPrice <= 0 || qty <= 0) { skippedCount++; continue; }
-            const budgetPerUnit = lot.count > 0 ? (parseFloat(lot.amount) || 0) / parseFloat(lot.count) : 0;
-            const dropPercent = budgetPerUnit > 0 ? Math.round(((budgetPerUnit - unitPrice) / budgetPerUnit) * 1000) / 10 : 0;
-            const category = detectCategory(lot.nameRu, lot.descriptionRu);
-            const characteristics = extractSpecsBrain(((lot.nameRu||"")+" "+(lot.descriptionRu||"")+" "+(c.descriptionRu||"")));
-
-            // ID документа = trdBuyId_lotId_supplierBin (уникальный, исключает дубли)
-            const docId = `${c.trdBuyId}_${lot.id}_${c.supplierBiin || "no"}_${Math.round(unitPrice)}`;
-            const docRef = fbStore.collection("tenders").doc(docId);
-            batch.set(docRef, {
-              category: category,
-              characteristics: characteristics.slice(0, 15),
-              lotId: lot.id,
-              lotNumber: lot.lotNumber || "",
-              lotName: lot.nameRu || "",
-              lotDescription: lot.descriptionRu || "",
-              contractDescription: c.descriptionRu || "",
-              budget: parseFloat(lot.amount) || 0,
-              qty: parseFloat(lot.count) || 0,
-              budgetPerUnit: Math.round(budgetPerUnit * 100) / 100,
-              winnerPrice: unitPrice,
-              winnerQty: qty,
-              winnerTotal: parseFloat(u.totalSum) || 0,
-              winnerName: c.supplierFio || "",
-              winnerBin: c.supplierBiin || "",
-              dropPercent: dropPercent,
-              customerName: lot.customerNameRu || "",
-              region: detectRegion(lot.customerNameRu),
-              signDate: c.signDate || "",
-              lotDate: lot.lastUpdateDate || "",
-              source: "goszakup",
-              seedWord: word,
-              createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-            batchCount++;
-            // Firestore лимит 500 операций в одном batch
-            if (batchCount >= 450) {
-              await batch.commit();
-              savedCount += batchCount;
-              batch = fbStore.batch();   // ВАЖНО: создаём новый batch после commit
-              batchCount = 0;
-            }
-          }
-        }
-        if (batchCount > 0) {
-          await batch.commit();
-          savedCount += batchCount;
-        }
-      }
-
-      if (lots.length < 200) break; // последняя страница
-    }
-
+    const result = await seedOneWord(word, maxPages, startAfter);
     res.json({
       ok: true,
-      word: word,
-      pagesProcessed: maxPages,
-      savedTenders: savedCount,
-      skipped: skippedCount,
-      nextAfter: after,
-      message: `Сохранено ${savedCount} тендеров в мозг по слову "${word}". Если хочешь больше — повтори с параметром after=${after}`
+      ...result,
+      message: `Сохранено ${result.savedTenders} тендеров в мозг по слову "${result.word}". Если хочешь больше — повтори с параметром after=${result.nextAfter}`
     });
   } catch (e) {
     console.error("brain/seed error:", e);
     res.status(500).json({ error: e.message });
   }
 });
+
+// ============================================================
+// /api/brain/seedmany — АВТОЗАЛИВКА списка слов
+// Тело POST или query: words=мяч,медаль,кубок&pages=2
+// ============================================================
+app.get("/api/brain/seedmany", async (req, res) => {
+  if (!fbStore) return res.status(500).json({ error: "Firebase Admin не настроен" });
+  if (!GOSZAKUP_TOKEN) return res.status(500).json({ error: "GOSZAKUP_TOKEN не настроен" });
+  const wordsParam = (req.query.words || "").trim();
+  if (!wordsParam) return res.status(400).json({ error: "Укажите words=слово1,слово2,...&pages=N" });
+  const words = wordsParam.split(/[,;|]/).map(s => s.trim()).filter(Boolean);
+  const maxPages = parseInt(req.query.pages) || 1;
+
+  // Увеличиваем таймаут ответа (Render по умолчанию рубит через ~120 сек)
+  // На каждое слово до 60 сек — 20 слов = 20 минут максимум
+  req.setTimeout(20 * 60 * 1000);
+  res.setTimeout(20 * 60 * 1000);
+
+  const results = [];
+  let totalSaved = 0;
+  let totalSkipped = 0;
+  let totalErrors = 0;
+
+  for (const word of words) {
+    try {
+      const r = await seedOneWord(word, maxPages, 0);
+      results.push({ word, saved: r.savedTenders, skipped: r.skipped, ok: true });
+      totalSaved += r.savedTenders;
+      totalSkipped += r.skipped;
+      console.log(`✓ ${word}: +${r.savedTenders}`);
+    } catch (e) {
+      results.push({ word, error: e.message, ok: false });
+      totalErrors++;
+      console.error(`✗ ${word}: ${e.message}`);
+      // Если квота кончилась — стоп
+      if (String(e.message).indexOf("RESOURCE_EXHAUSTED") >= 0) {
+        console.log("Квота Firebase превышена — остановка");
+        break;
+      }
+    }
+  }
+
+  res.json({
+    ok: true,
+    wordsProcessed: results.length,
+    totalSaved: totalSaved,
+    totalSkipped: totalSkipped,
+    totalErrors: totalErrors,
+    results: results
+  });
+});
+
 
 // Статистика мозга
 app.get("/api/brain/stats", async (req, res) => {

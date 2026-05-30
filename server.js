@@ -21,7 +21,28 @@ let fbStore = null;
 if (FIREBASE_SA) {
   try {
     firebaseAdmin = require("firebase-admin");
-    const serviceAccount = JSON.parse(FIREBASE_SA);
+    // Парсим JSON. Render может передать с реальными переносами строк в значениях —
+    // тогда обычный JSON.parse падает. Чиним: сначала пробуем напрямую, потом с заменой.
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(FIREBASE_SA);
+    } catch (e1) {
+      // 1-й fallback: меняем реальные переносы внутри значений на \n
+      // (заменяем переносы строк на экранированные)
+      try {
+        const fixed = FIREBASE_SA
+          .replace(/\r/g, "")
+          // Внутри значений private_key реальные \n должны быть как \\n
+          .replace(/("private_key"\s*:\s*")([\s\S]*?)("\s*,)/, (m, a, b, c) => a + b.replace(/\n/g, "\\n") + c);
+        serviceAccount = JSON.parse(fixed);
+      } catch (e2) {
+        throw new Error("Не могу распарсить FIREBASE_SA: " + e2.message);
+      }
+    }
+    // private_key должен содержать реальные переносы строк — приводим обратно
+    if (serviceAccount.private_key && serviceAccount.private_key.indexOf("\\n") >= 0) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+    }
     firebaseAdmin.initializeApp({
       credential: firebaseAdmin.credential.cert(serviceAccount)
     });

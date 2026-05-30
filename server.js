@@ -532,7 +532,7 @@ app.get("/api/brain/seed", async (req, res) => {
         const contracts = (cData && cData.Contract) ? cData.Contract : [];
 
         // 3) Сохраняем в Firebase каждую позицию договора как отдельную запись
-        const batch = fbStore.batch();
+        let batch = fbStore.batch();
         let batchCount = 0;
         for (const c of contracts) {
           const lotsForTb = lotsByTb[c.trdBuyId] || [];
@@ -580,6 +580,7 @@ app.get("/api/brain/seed", async (req, res) => {
             if (batchCount >= 450) {
               await batch.commit();
               savedCount += batchCount;
+              batch = fbStore.batch();   // ВАЖНО: создаём новый batch после commit
               batchCount = 0;
             }
           }
